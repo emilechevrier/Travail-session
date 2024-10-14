@@ -25,8 +25,11 @@ Manifest
 ___
 * https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/new-modulemanifest?view=powershell-7.4
 
+Secure string
 ___
+* https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/convertto-securestring?view=powershell-7.4
+
+
 ### Commandes utiles (personnel pour travailler)
 
  New-ModuleManifest -Path ./AD_TO_PSQL.psd1 `
-                
