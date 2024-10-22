@@ -1,7 +1,7 @@
 # Documentation
 
 ## Modules
-Liste des modules utilisés dans ce projet/script.
+Liste des modules utilisés dans ce projet.
 
 ## Description
 
@@ -9,8 +9,21 @@ Liste des modules utilisés dans ce projet/script.
 
 ## Commandes de création
 
+### Hyper-v
+Installtion du module hyper-v. Le redémarrage est automatique.
+```
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All 
+```
+Tapez "Y" dans le terminal pour redémarrer la votre machine  
+
+![Say_yes_image](./image/Image_1_say_yes.png)
+
+
 
 ## Installation
+
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
 
 ## Commandes
 Les commandes PowerShell suivantes sont utilisées dans le script :
@@ -19,6 +32,15 @@ Les commandes PowerShell suivantes sont utilisées dans le script :
 # Commande pour lister les fichiers dans un répertoire
 
 ```
+Install Putty
+```
+Invoke-WebRequest -Uri "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi" -OutFile "$env:TEMP\putty-installer.msi"
+```
+```
+Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\putty-installer.msi /quiet" -Wait
+```
+
+
 ## Références
 
 Manifest 

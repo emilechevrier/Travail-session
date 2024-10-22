@@ -12,20 +12,80 @@ Nous le récupérons via les windows  #>
 <# Paramètre de connexion de la VM. Soit entrer les informations manuellement soit utiliser ceux par défaut. Pour l'obectif du devoir elle seront présentes ici puisqu'il s'agit d'une 
 vm Hyper-v avec aucune information sensible.
 #>
-$VMUSER = "vm_user"
-$VMPASSWORD = "vm_password"
+$VMUSER = "Administrator"
+$VMPASSWORD = ""
 
+# Putty path
+$PUTTYPATH = "C:\Program Files\PuTTY\putty.exe"
+$PLINLKPATH = "C:\Program Files\PuTTY\plink.exe"	
 
 # Database credentials
 $PGUSER = "Admin_postgres"
 $PGDATABASE = "Default database"
-$PGHOST = "localhost"
+$PGPASSWORD =""
+$PSQLPORT = "5432"
+$PGHOST = "172.25.91.6"
+
+#Variable globales pour le script
+$SSHCONNECTION = $null
+
+$REGEXIPV4 = '\b((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
 
 #Fonction privé du module AD_TO_PSQL
 #___________________________________________________________________________________________________________________________`
 
 
-function init_module{
+<#Fonction IIF pour simuler la fonction IIF dans des language et pouvoir gérer les conditions null aussi en une seule ligne parce qu'un langage devrait avoir cette contraction qui permet 
+de pas perdre de temps et rendre le code plus lisible. Si le vrai ou faux n'est pas définis ils sont True ou False par défaut #>
+Function IIf($IfCondition, $IfTrue = $True, $IfFalse = $False) {
+    try {
+        If ($If) {
+            return $IfTrue}
+        Else {
+            return  $IfFalse
+        } 
+    }
+    catch {
+        return  $null
+    }
+}
+
+#Function récursive pour vérifier si les conditions sont respectées
+Function VerifyInput([string] $user_input_message,[string] $IIFCondition,[string]$trueCondition,[string]$falseCondition,[int] $number_trial = $null){
+
+    if ($null -eq $number_trial){
+        $number_trial += 1
+        If ($number_trial -gt 5){
+            Write-Host "Concentrez vous sur la question ceci ne respect pas le format demandé"
+            return $false
+        }
+    }
+    $validated_input = IIf(($input -match $IIFCondition), $trueCondition, $falseCondition)
+    if ($validated_input -eq $falseCondition){     
+        VerifyInput($user_input_message, $IIFCondition, $trueCondition, $falseCondition, $number_trial)
+    }
+    return $validated_input
+}
+
+
+
+function init_module {
+    # Install PuTTY if it's not present
+    if (!(Test-Path $PUTTYPATH)) {
+        Invoke-WebRequest -Uri "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi" -OutFile "$env:TEMP\putty-installer.msi"
+        Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\putty-installer.msi /quiet" -Wait
+    }
+      $process = Start-Process plink -ArgumentList "-ssh $VMUSER@$PGHOST -pw $VMPASSWORD dir" -Wait
+      Write-Host $process.ExitCode
+      Write-Host $process.StandardOutput
+    # Prompt before exit
+    Write-host $SSHCONNECTION
+    Write-Host "Press Enter to exit."
+    Read-Host
+}
+
+
+function menu_display{
     
 }
 
@@ -94,6 +154,18 @@ function Remove-user{
     )
 }
 
+function Edit-User{
+    param(
+        [string]$username
+    )
+} 
+
+function Edit-group{
+    param(
+        [string]$groupname
+    )
+}
+
 #Uniquement les fonction exporté pour le module afin de garder les fonctions privé non utilisable par l'utilisateur
-Export-ModuleMember -Function Get-UserData, Add-Group, Add-User, Remove-Group, Remove-user
+Export-ModuleMember -Function  Add-Group, Add-User, Remove-Group, Remove-user, Edit-User, Edit-group
 
