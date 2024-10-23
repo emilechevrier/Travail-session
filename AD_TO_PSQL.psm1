@@ -12,16 +12,10 @@ Nous le récupérons via les windows  #>
 <# Paramètre de connexion de la VM. Soit entrer les informations manuellement soit utiliser ceux par défaut. Pour l'obectif du devoir elle seront présentes ici puisqu'il s'agit d'une 
 vm Hyper-v avec aucune information sensible.
 #>
-$VMUSER = "Administrator"
-$VMPASSWORD = ""
-
-# Putty path
-$PUTTYPATH = "C:\Program Files\PuTTY\putty.exe"
-$PLINLKPATH = "C:\Program Files\PuTTY\plink.exe"	
 
 # Database credentials
 $PGUSER = "Admin_postgres"
-$PGDATABASE = "Default database"
+$PGDATABASE = "CR431"
 $PGPASSWORD =""
 $PSQLPORT = "5432"
 $PGHOST = "172.25.91.6"
@@ -29,7 +23,6 @@ $PGHOST = "172.25.91.6"
 #Variable globales pour le script
 $SSHCONNECTION = $null
 
-$REGEXIPV4 = '\b((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
 
 #Fonction privé du module AD_TO_PSQL
 #___________________________________________________________________________________________________________________________`
@@ -51,79 +44,51 @@ Function IIf($IfCondition, $IfTrue = $True, $IfFalse = $False) {
 }
 
 #Function récursive pour vérifier si les conditions sont respectées
-Function VerifyInput([string] $user_input_message,[string] $IIFCondition,[string]$trueCondition,[string]$falseCondition,[int] $number_trial = $null){
-
+Function VerifyInput([string] $user_input_message,[string] $error_message,[string] $IIFCondition,[string]$falseCondition,[int] $number_trial = $null){
+    $user_input = Read-Host $user_input_message
     if ($null -eq $number_trial){
         $number_trial += 1
         If ($number_trial -gt 5){
-            Write-Host "Concentrez vous sur la question ceci ne respect pas le format demandé"
-            return $false
+            Write-Host $error_message
+            return Throw "Trop d'erreur dans la lecture de l'entrée"
         }
     }
-    $validated_input = IIf(($input -match $IIFCondition), $trueCondition, $falseCondition)
-    if ($validated_input -eq $falseCondition){     
+    if ($validated_input -match $IIFCondition){     
+        return $validated_input        
+    }else{
         VerifyInput($user_input_message, $IIFCondition, $trueCondition, $falseCondition, $number_trial)
     }
-    return $validated_input
+    
 }
-
-
-
-function init_module {
-    # Install PuTTY if it's not present
-    if (!(Test-Path $PUTTYPATH)) {
-        Invoke-WebRequest -Uri "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi" -OutFile "$env:TEMP\putty-installer.msi"
-        Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\putty-installer.msi /quiet" -Wait
-    }
-      $process = Start-Process plink -ArgumentList "-ssh $VMUSER@$PGHOST -pw $VMPASSWORD dir" -Wait
-      Write-Host $process.ExitCode
-      Write-Host $process.StandardOutput
-    # Prompt before exit
-    Write-host $SSHCONNECTION
-    Write-Host "Press Enter to exit."
-    Read-Host
-}
-
 
 function menu_display{
     
 }
 
-function connect_database{
-    <#Paramètre d'entré de la fonction. L'utilisateur peut être null parce que nous utiliserons l'admin postgre afin de faire des opérations sur la base de données autrement si
-    l'utilisateur est données avec sont mot de passe il peut faire une lecture sur la base de données selon les permissions de sont groupes qui lui est accordés.
-    #>
-    param(
-        [string]$server,
-        [string]$database,
-        [string]$username = $null,
-        #Secure string pour protéger le mot de passe est une recommendation de Microsoft
-        [securestring]$password = $null 
-    )
+#Secure string pour protéger le mot de passe est une recommendation de Microsoft
+function psql_command([string]$server,[string]$database,[string]$username,[securestring] $password ){
+    try {
 
-    if ($username -eq $null){ 
-        #Récupération de l'utilisateur admin de la base de données
-        $username = $PGUSER
-        
-        #$password = récupération du mot de passe dans windows credentials voir si securesring fonctionnera avec les commandes PSQL
+        $username = IIf($username -eq $null,$PGUSER,$username)  
+        [System.Environment]::SetEnvironmentVariable('PGPASSWORD', $connection.Password)
+        psql -U $username -d $database -h $server '-c' $query
+    }
+    catch {
+        throw "Ha non quelque chose fonctionne pas: $_"
     }
 }
 
-function execute_query{
-    #Paramètre d'entré de la fonction
-    param(
-        [string]$query,
-        [string]$username = $null,
-        [securestring]$password = $null
-    )
-
-    #Connexion à la base de données en admin
+function execute_query ([string]$query,[string]$username = $null,[securestring]$password = $null){
+    
+    $password = IIf($password -eq $null,$PGPASSWORD,$password)
+    <#Comparaison des valeurs pour éviter les valeur null on se connect en admin. Ce cas de figure arrive principalement dans 
+    les connections qui doivent simplement modifier la base de données pour correspondre au active directory#>    #Connexion à la base de données en admin
     if($username -eq $null){
-        connect_database($PGHOST, $PGDATABASE)
+        psql_command($PGHOST, $PGDATABASE)
     }
     #Connexion à la base de données en utilisateur
     else{
-        connect_database($PGHOST, $PGDATABASE, $username, $password)
+        psql_command($PGHOST, $PGDATABASE, $username, $password)
     }
 }
 
@@ -131,9 +96,40 @@ function execute_query{
 #Commande du module AD_TO_PSQL
 function Add-Group{
     #Paramètre d'entré de la fonction
-    param(
-        [string]$groupname
-    )
+    try {
+        
+        #Validation de toute les entrées
+        $nomGroupe = VerifyInput("Entrez un nom de groupe puis appuis sur la touche Entrer.","SVP entrez au minimun un caratère","-ne $null","Throw",5 )
+
+        #Création du groupe
+        $query += "CREATE ROLE $nomGroupe;"
+        
+        $query +=  GRANT CREATE ON DATABASE $PGDATABASE TO $nomGroupe;
+        GRANT CONNECT ON DATABASE $ TO my_group;
+        
+        GRANT USAGE ON SCHEMA public TO my_group;
+        GRANT CREATE ON SCHEMA public TO my_group;
+        
+        GRANT SELECT ON ALL TABLES IN SCHEMA public TO my_group;
+        GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO my_group;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO my_group;
+        
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO my_group;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO my_group;
+        
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO my_group;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO my_group;
+        
+        GRANT my_group TO existing_user;
+    
+
+
+        execute_query()
+    }
+    catch {
+        <#Do this if a terminating exception happens#>
+    }
+
 }
 
 function Add-User{
