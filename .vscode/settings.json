@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run AD_TOPSQL Module",
+            "type": "process",
+            "command": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Import-Module 'C:\\Users\\Administrator\\Documents\\Travail-session\\AD_TOPSQL.psm1'; YourFunctionNameHere"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

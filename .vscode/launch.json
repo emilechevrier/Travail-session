@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug AD_TO_PSQL Module",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "C:\\Users\\Administrator\\Documents\\Travail-session\\AD_TO_PSQL.ps1",
+            "args": [], // Add any function parameters here if needed
+            "cwd": "${workspaceFolder}",
+            "enableDebugging": true,
+            "runtimeExecutable": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+        }
+    ]
+}
