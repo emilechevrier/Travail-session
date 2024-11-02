@@ -24,6 +24,8 @@ Tapez "Y" dans le terminal pour redémarrer la votre machine
 
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
+Install-Package -Name Npgsql -Source https://www.nuget.org/api/v2
+
 
 ## Commandes
 Les commandes PowerShell suivantes sont utilisées dans le script :
