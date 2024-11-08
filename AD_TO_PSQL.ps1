@@ -199,16 +199,12 @@ function get_all_domain_group_permission {
     $groups = Get-ADGroup -Filter * | Where-Object { $_.DistinguishedName -like "*OU=Domain Controllers,*" }|Select-Object Name
 
     foreach ($group in $groups) {
-        # Récupération du nom de groupe de sécurité
-        $domain_group_name = ($group.DistinguishedName -split ',')[0] -replace "CN="
-
-
-        $group = Get-ADGroup -Identity "Employee"
+        $group = Get-ADGroup -Identity $group.name
         $sd = Get-ADObject -Identity $group.DistinguishedName -Properties ntSecurityDescriptor
         $sd.ntSecurityDescriptor.Access
         
         $acl = Get-Acl -Path "C:\"
-        $group_access =  $acl.Access | Where-Object { $_.IdentityReference -like "*Employee" }
+        $group_access =  $acl.Access | Where-Object { $_.IdentityReference -like $group.name }
         $group_access.FileSystemRights
 
 
