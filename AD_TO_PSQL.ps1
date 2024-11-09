@@ -1,21 +1,34 @@
+
 Import-Module CredentialManager
-#Le path pour les module supporté par l'ancien powershell et qui ne sont pas trouvable sur powershell 7 
+#Le path pour les module supporté par l'ancien powershell et qui ne sont pas trouvable sur powershell 7 il faut pointer pws 5
 $env:PSModulePath += ";C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
 Import-Module ActiveDirectory
 
+#Ajout d'une DLL parce que ce n'est pas une librairie pws. Elle est récupéré de nuget.org qui contient plusieurs librairie Dotnet
+#L'avantage de Npgsql est que ça retourne un objet avec lequel on peut travailler au lieu de recevoir un array de string avec la réponse
+#Il faut un environnement de dev dotnet pour arriver a installer la librairie et je pointe sur la localisation du projet dotnet dans les 
+#librairies de projet.J'ai dû google et chatgpt cette partie parce que normalement on utilise cette libraire en dev et non pas en 
+
+
+#la librairie abstration est requise pour Npgsql il semblerait que ça donner les élement de culture probablement pour la langue de l'utilisateur
+# afin de savoir le format a retourner
+$abstractionPath = "$env:UserProfile\.nuget\packages\microsoft.extensions.logging.abstractions\8.0.0\microsoft.extensions.logging.abstractions.8.0.0\lib\net8.0\Microsoft.Extensions.Logging.Abstractions.dll"
+Add-Type -Path $abstractionPath
+
+$npgsqlPath = "$env:UserProfile\.nuget\packages\npgsql\8.0.5\lib\net8.0\Npgsql.dll"
+Add-Type -Path $npgsqlPath
 
 
 #Variable globales pour le script
 #___________________________________________________________________________________________________________________________`
 # Database credentials
 $PGUSER = "postgres"
-$PGDATABASE = "postgres"
-$PGPASSWORD =""
+$PGDATABASE = "CR431"
+
 <#Pour cette itération de code on présume que nous travaillons directement sur le serveur postgres sur lequel nous voulons faire des
 changement et que postgre est configuré par défaut. Pour l'exercice j'ai codé avec des variable statique parce que ça demandais moins d'effort que de commencer 
 à faire des menu d'acquisition de la configuration.Les mettre dans des varaibles globales permettrait l'amélioration à long terme  #>
-$PSQLPORT = "5432"
-$PGHOST = "localhost"
+$PG_HOST = "localhost"
 
 $PG_WINDOWS_CRED_USER ="postgres_main_user"
 
@@ -24,10 +37,12 @@ $REGEX_N = "^[Nn]$"
 $O_or_N_TEXT = "Tapez Oui ou Non (O/N) puis tapez la touche entrer."
 
 
-$SSHCONNECTION = $null
+$REGEX_SELECT = 'Synchronize|ReadAndExecute|Read|ReadPermissions|ExecuteFile|Traverse|ReadAttributes|ReadExtendedAttributes|ReadData|ListDirectory' 
 
-
-
+$REGEX_COMMUN_C_U= 'WriteAttribute|CreateDirectories|AppendData|WriteData|WriteExtendedAttributes|CreateFiles|Write'
+$REGEX_CREATE = 'Write' 
+$REGEX_UPDATE = 'Modify' 
+$REGEX_DELETE = 'Modify|DeleteSubdirectoriesAndFiles|Delete' 
 
 #Fonction privé du module AD_TO_PSQL
 #___________________________________________________________________________________________________________________________`
@@ -85,7 +100,7 @@ function save_windows_credentials ([string] $credential_name) {
     }            
 }
 
-function psql_command ([string] $query,[string] $database =$PGDATABASE, [string] $username =$PGUSER, [securestring] $password  ) {
+function PsqlCommand ([string] $query,[string] $database =$PGDATABASE, [string] $username =$PGUSER, [securestring] $password  ) {
 
     <# Si le mot passe de est donnée c'est pour exécuter la commande en tant qu'une user particulier sinon c'est pour prendre 
     le user postgre par défaut , mais il faut être admin de la machine pour y accéder par défaut#>
@@ -105,11 +120,47 @@ function psql_command ([string] $query,[string] $database =$PGDATABASE, [string]
 
         
     } 
+
+    #Fait une connexion postgre pour executer la commande sql
+    $connection_param = "Host=$PG_HOST;Database=$PGDATABASE;Username=$username;Password=$plain_password;"
+    $connection = New-Object Npgsql.NpgsqlConnection($connection_param)
+    $connection.Open()
+    $createGroupCommand = New-Object Npgsql.NpgsqlCommand($query, $connection)
+    #ExecuteReader retourne la valeur 
+    $reader =$createGroupCommand.ExecuteReader()
+    
+
+    $results = @()
+
+    <#le resultat sort en un objet et il faut faire une curseur pour trouver la valeur sous forme lisible 
+    en on le map dans un hash pour avoir ainsi des objets
+
+    La fonction read li un lot de données soit 1 hash a la fois. Les hash sont fait par la fonction read 
+
+    https://www.npgsql.org/doc/basic-usage.html
+    #>
+    while ($reader.Read()) {
+        # Create a hashtable for each record
+        $record = @{}
+        for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+            $record[$reader.GetName($i)] = $reader.GetValue($i)
+        }
+
+        $results += $record
+    }
+
+    $connection.Close()
+
+    # Close the reader
+    $reader.Close()
+
+    return $results 
+
     # Exécute la commande demandé avec le user obtenue admin ou simple utilisateur
-    $psqlCommand = "psql -h $PGHOST -U $username -d $database -c `"$query`" --password=$plain_password"
+    #$psqlCommand = "psql -h $PG_HOST -U $username -d $database -c `"$permission_query`" --password=$plain_password"
 
     # Execute the command
-    Invoke-Expression $psqlCommand
+    #return Invoke-Expression $psqlCommand
 }
 
 
@@ -189,194 +240,147 @@ function verify_input (
     Write-Host "$error_message, il vous reste $number_trial essait"             
     return verify_input $user_input_message  $error_message $true_conditio_fail $false_condition_fail $number_trial $returnTrueOrFalse          
 }
-
-function get_all_domain_group_permission {
+#Liste de controle
+#https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemrights?view=net-8.0
+        
+function PermissionADtoPSQL {
 
     # Initialisation d'un tableau pour stocker les permissions des groupes
-    $groupPermissions = @()
+    $group_permissions = @()
 
     # Récupération de tous les groupes qui font parti de l'arbre Domain Controllers
     $groups = Get-ADGroup -Filter * | Where-Object { $_.DistinguishedName -like "*OU=Domain Controllers,*" }|Select-Object Name
-
+    $acl = Get-Acl -Path "C:\"
     foreach ($group in $groups) {
-        $group = Get-ADGroup -Identity $group.name
-        $sd = Get-ADObject -Identity $group.DistinguishedName -Properties ntSecurityDescriptor
-        $sd.ntSecurityDescriptor.Access
-        
-        $acl = Get-Acl -Path "C:\"
-        $group_access =  $acl.Access | Where-Object { $_.IdentityReference -like $group.name }
-        $group_access.FileSystemRights
-
-
-        $acl = Get-ACL -Path ("AD:" + $domain_group_name)
-
-        $permissions = @()
-        foreach ($access in $acl.Access) {
-            # Récupération des types de permissions pour chaque entrée
-            $permissions += $access.FileSystemRights.ToString()
+        <#Obtenir le descriptif de sécurité donc les composantes de sécurité de 
+        la composant dans le cas présent le C:\#>
+        $group_name = $group.name        
+        $group_access =  $acl.Access | Where-Object { $_.IdentityReference -like "*$group_name" }
+        $group_permission = $group_access.FileSystemRights
+        #Transforme object groupe de permission en string pour passer d'un objet à un string avec le join a une liste avec split
+        $split_permission = ($group_permission -join ',') -split ","
+        $translatePermission = @($false,$false,$false,$false,$false)
+        foreach ($permission in $split_permission ){
+            <# Permission mise dans un array 
+            array (select, create, update,delete,super_user)
+            array (0,0,0,0,0)
+            #>
+            if ($permission -match 'FullControl|ChangePermissions|TakeOwnership'){
+                $translatePermission = @($true,$true,$true,$true,$true)
+            }else{
+                switch -Regex ($permission) {
+                    $REGEX_SELECT {
+                        #Select  permission 
+                        $translatePermission[0] = $true
+                    }
+                    $REGEX_COMMUN_C_U{
+                        #create permission
+                        $translatePermission[1] = $true
+                        #update  permission
+                        $translatePermission[2] = $true
+                    }
+                    $REGEX_CREATE {
+                        #create permission 
+                        $translatePermission[1] = $true
+                    }
+                    $REGEX_UPDATE {
+                        #Permission modifie est inclus le write                          
+                        #create permission
+                        $translatePermission[1] = $true
+                        #update  permission
+                        $translatePermission[2] = $true
+                    }
+                    $REGEX_DELETE {
+                        #update  permission 
+                        $translatePermission[3] = $true
+                    }
+                }
+            }
+            #Création d'un objet pour les permissions traduites du C: vers Postgres
         }
-
-        # Ajout du groupe et de ses permissions dans le tableau
-        $groupPermissions += [pscustomobject]@{
-            group_name = $group.Name
-            Permission = $permissions
+        $group_permissions += [PSCustomObject]@{
+            name = $group_name
+            permissions =$translatePermission
         }
     }
-
-    # Retourner le tableau des permissions
-    return $groupPermissions
+    # Retourner le tableau des permissions par groupe 
+    return $group_permissions
 }
 
 
 
-<#function psql_command([string]$server,[string]$database,[string]$username,[securestring] $password ){
-    try {
-
-        $username = IIf($username -eq $null,$PGUSER,$username)  
-        [System.Environment]::SetEnvironmentVariable('PGPASSWORD', $connection.Password)
-        psql -U $username -d $database -h $server '-c' $query
-    }
-    catch {
-        throw "Ha non quelque chose fonctionne pas: $_"
-    }
-}#>
 
 #___________________________________________________________________________________________________________________________`
 #Commande du module AD_TO_PSQL
-
-
-
-function Add-Group{
+function Update-GroupPsqlDb{
     #Paramètre d'entré de la fonction
     try {        
-        #Validation de toute les entrées    
-        
+        # Récupère les permissions mises sur le disque C: pour chaque groupe faisant parti des administrateur domaine AD 
+        $list_domain_groups = PermissionADtoPSQL
 
-
-        $list_domain_group = get_all_domain_group_permission
-
-        $group_name = verify_input "Entrez un nom de groupe puis appuis sur la touche Entrer." "SVP entrez au minimun un caractère" "^[A-Za-z]*$" "" 4  $False
-
-        <#Permission sur le C: afin que les permissions soient globales , c'est dans l'optique de crééer des groupe rapidement qui peuvent représenter les permissions globale du 
-        groupes sur la machine.Permission de lecture de la base et les tables de donnée.
-        #>
-        $database_message_1= "Est-ce que vous voulez permettre de faire"
-        $database_message_2 = "sur la base de données."
-        $o_n_error = "SVP entrez au minimun un caractère"
-
-        $select_permission_db = verify_input "$database_message_1 des lecture $database_message_2 $O_or_N_TEXT" $o_n_error $REGEX_O $REGEX_N 2 $True       
-        #Droit de écriture de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
-        $write_permission_db = verify_input "$database_message_1 de l'écriture $database_message_2 $O_or_N_TEXT" $o_n_error $REGEX_O $REGEX_N 2 $True
-        #Droit de modification de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
-        $update_permission_db = verify_input "$database_message_1 la modification $database_message_2 $O_or_N_TEXT" $o_n_error $REGEX_O $REGEX_N 2 $True        
-        #Droit de supprimer de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
-        $delete_permission_db = verify_input "$database_message_1 la suppression $database_message_2 $O_or_N_TEXT" $o_n_error $REGEX_O $REGEX_N 2 $True
-        #Droit de Super user  de la base de donnée et Full control sur le C
-        $super_user = verify_input "Est-ce que vous voulez permettre d'avoir les permission d'administrator $database_message_2 $O_or_N_TEXT" $o_n_error $REGEX_O $REGEX_N 2 $True
-
-         <#
-        https://www.lepide.com/how-to/get-an-ntfs-permissions-report-using-powershell.
-        
-        https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemaccessrule?view=net-8.0
-        #>
-
-        Write-Host "Permission lecture $select_permission_db"
-        Write-Host "Permission modification $write_permission_db"
-        Write-Host "Permission modification $update_permission_db"
-        Write-Host "Permission suppression $delete_permission_db"
-        Write-Host "Permission administrateur $super_user"
-
-        #Liste des accès de contrôle actuelle sur le répertoire C:
-        $acl = Get-Acl "C:\"
-        #Création du groupe
-        $query += "CREATE ROLE $group_name;"
-        
-        #Variable pour savoir si les permissions sont déjà attribués
-        $function_procedure_permission = $false
-
-        $write_folder_permission = $null   
-        # permission table et de la base de données
-        if ($super_user) {
-            $query = "ALTER ROLE $group_name WITH SUPERUSER;"
-        }else{
-            if ($select_permission_db) { 
-                $query += "GRANT CONNECT ON DATABASE $PGDATABASE[0] TO $group_name;" 
-                $query += "GRANT SELECT ON ALL TABLES IN SCHEMA public TO $group_name;"
-                $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $group_name;"
-            }
-            if ($write_permission_db) { 
-                $query += "GRANT CREATE ON DATABASE $PGDATABASE[0] TO $group_name;"
-                $query += "GRANT INSERT ON ALL TABLES IN SCHEMA public TO $group_name;"
-                $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO $group_name;"
-                
-                $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $group_name;"  
-            }
-            if ($update_permission_db) {
-                $query += "GRANT TEMPORARY ON DATABASE $PGDATABASE[0] TO $group_name;"
-                $query += "GRANT UPDATE ON ALL TABLES IN SCHEMA public TO $group_name;"
-                $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT UPDATE ON TABLES TO $group_name;"
-                if (-not $function_procedure_permission){
-                    $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $group_name;"
-                    $function_procedure_permission = $True
-                }
-            }
-            if ($delete_permission_db) {
-                $query += "GRANT TEMPORARY ON DATABASE $PGDATABASE[0] TO $group_name;"
-                $query += "GRANT DELETE ON ALL TABLES IN SCHEMA public TO $group_name;" 
-                $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, DELETE ON TABLES TO $group_name;"
-                if (-not $function_procedure_permission){
-                    $query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $group_name;"
-                }
-            }
-        }
-
-        # Création du groupe  
-        if (-not (Get-ADGroup -Filter { Name -eq $group_name })) {        
-            $current_user = whoami
-            New-LocalGroup -Name $group_name -Description "Ceci est un groupe créé par $current_user avec la librairie AD_TO_PSQL"
-        } 
-
-        #_______________________________________
-        #permission sur le groupe 
-        if ($super_user) { 
-            # permissions sont mis dans les objets .net 
-            $read_folder_permission = New-Object System.Security.AccessControl.FileSystemAccessRule($group_name, "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
-            # Ajouter les permission à l'objet
-            $acl.SetAccessRule($read_folder_permission)
-        }        
-        if ($select_permission_db) { 
-            # permissions sont mis dans les objets .net 
-            $read_folder_permission = New-Object System.Security.AccessControl.FileSystemAccessRule($group_name, "ReadAndExecute", "ContainerInherit, ObjectInherit", "None", "Allow")
-            # Ajouter les permission à l'objet
-            $acl.SetAccessRule($read_folder_permission)
-        }
-        if (($update_permission_db -or $write_folder_permission) -or ($update_permission_db -and $write_folder_permission)) {
-            $write_folder_permission = New-Object System.Security.AccessControl.FileSystemAccessRule($group_name, "Write", "ContainerInherit, ObjectInherit", "None", "Allow") 
-            $acl.SetAccessRule($write_folder_permission)
-        }          
-        if ($delete_permission_db) {
+        foreach ($group in $list_domain_groups ){
+            $select_permission_db = $group.permissions[0]       
+            #Droit de écriture de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
+            $write_permission_db =$group.permissions[1]  
+            #Droit de modification de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
+            $update_permission_db = $group.permissions[2]         
+            #Droit de supprimer de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
+            $delete_permission_db = $group.permissions[3]  
+            #Droit de Super user  de la base de donnée et Full control sur le C
+            $super_user = $group.permissions[4]      
+            #Variable pour savoir si les permissions sont déjà attribués
+            $function_procedure_permission = $false
+    
+            $groupName = $group.name
             # permission table et de la base de données
-            $query += "GRANT TEMPORARY ON DATABASE $PGDATABASE[0] TO $group_name;"
-            $query += "GRANT DELETE ON ALL TABLES IN SCHEMA public TO $group_name;" 
-            $delete_folder_permission = New-Object System.Security.AccessControl.FileSystemAccessRule($group_name, "Delete", "ContainerInherit, ObjectInherit", "None", "Allow")
-            $acl.SetAccessRule($delete_folder_permission)
+            $group_exist_query = "SELECT 1 FROM pg_roles WHERE rolname = '$groupName';"
+
+
+            $group_exist_query = 'SELECT * FROM public.authors;'
+            $exist =  PsqlCommand($group_exist_query)
+
+            if ($exists -ne "") {
+                # Group does not exist, create it
+                $createGroupQuery = "CREATE ROLE $groupName;"
+                PsqlCommand($createGroupQuery, $connection)
+            }
+            
+            $permission_query = ""
+            if ($super_user) {
+                $permission_query += "ALTER ROLE $groupName WITH SUPERUSER;"
+            } else {
+                if ($select_permission_db) { 
+                    $permission_query += "GRANT CONNECT ON SERVER TO $groupName;`n" 
+                    $permission_query += "GRANT USAGE ON SCHEMA public TO $groupName;`n"
+                    $permission_query += "GRANT SELECT ON ALL TABLES IN SCHEMA public TO $groupName;`n"
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $groupName;`n"
+                }
+                if ($write_permission_db) { 
+                    $permission_query += "GRANT CREATE ON SCHEMA public TO $groupName;`n"
+                    $permission_query += "GRANT INSERT ON ALL TABLES IN SCHEMA public TO $groupName;`n"
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT INSERT ON TABLES TO $groupName;`n"
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"  
+                }
+                if ($update_permission_db) {
+                    $permission_query += "GRANT UPDATE ON ALL TABLES IN SCHEMA public TO $groupName;`n"
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT UPDATE ON TABLES TO $groupName;`n"
+                    if (-not $function_procedure_permission) {
+                        $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
+                        $function_procedure_permission = $True
+                    }
+                }
+                if ($delete_permission_db) {
+                    $permission_query += "GRANT DELETE ON ALL TABLES IN SCHEMA public TO $groupName;`n" 
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT DELETE ON TABLES TO $groupName;`n"
+                    if (-not $function_procedure_permission) {
+                        $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
+                    }
+                }
+            }
+
+            #Mettre en application les modification des permissions dans la base de donnée.
+            PsqlCommand($permission_query)
         }
-
-        $query += "GRANT USAGE ON SCHEMA public TO $group_name;"
-        $query += "GRANT CREATE ON SCHEMA public TO $group_name;"
-        
-        $query += "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO $group_name;"
-        
-         
-        $query += "GRANT $group_name TO existing_user;"
-
-        Write-Host $query
-        Write-Host $select_permission_db,$update_permission_db,$delete_permission_db,$super_user
-        Write-Host $acl
-
-        #Mettre en application les modification des permissions sur répertoire C: et dans la base de donnée.
-        Set-Acl "C:\" $acl
-        psql_command($query)
     }
     catch {
         #Voici les erreurs 
@@ -420,6 +424,6 @@ function Edit-group{
 #Uniquement les fonction exporté pour le module afin de garder les fonctions privé non utilisable par l'utilisateur
 #Export-ModuleMember -Function  Add-Group, Add-User, Remove-Group, Remove-user, Edit-User, Edit-group
 
-Add-Group
+Update-GroupPsqlDb
 
-#psql_command "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false;"
+#PsqlCommand "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false;"
