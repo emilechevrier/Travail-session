@@ -36,6 +36,13 @@ $REGEX_O = "^[Oo]$"
 $REGEX_N = "^[Nn]$"
 $O_or_N_TEXT = "Tapez Oui ou Non (O/N) puis tapez la touche entrer."
 
+$PATH_FILE_RERPORT= "$env:UserProfile\Documents\"
+$FIRST_TIME_PASSWORD_PSQL ='New_p@$$w0rd_F0r_C0mp@ny_24!'
+
+#https://uibakery.io/regex-library/password
+$PASSWORD_COMPLEXITY = '^(?=(.*[A-Z]))(?=(.*[a-z]))(?=(.*\d))(?=(.*[!@#$%^&*()_+={}\[\]:;"''<>,.?-])).{8,}$'
+
+$LOG_FILE_PATH = "$env:UserProfile\ErrorLog.txt"
 
 $REGEX_SELECT = 'Synchronize|ReadAndExecute|Read|ReadPermissions|ExecuteFile|Traverse|ReadAttributes|ReadExtendedAttributes|ReadData|ListDirectory' 
 
@@ -43,6 +50,24 @@ $REGEX_COMMUN_C_U= 'WriteAttribute|CreateDirectories|AppendData|WriteData|WriteE
 $REGEX_CREATE = 'Write' 
 $REGEX_UPDATE = 'Modify' 
 $REGEX_DELETE = 'Modify|DeleteSubdirectoriesAndFiles|Delete' 
+
+#Objets 
+#https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_object_creation?view=powershell-7.4
+#Pour le context du travail je me tiens au concept généraux de la base de données bien que ça pourrais être plus précis
+# On se tient au concept de CRUD et Admin  = select, create, update,delete,super_user
+$PermissionMatrix= [PSCustomObject]@{
+    select = $false
+    create = $false
+    update = $false
+    delete = $false
+    super_user = $false
+}
+
+$GroupPermissions = [PSCustomObject]@{
+    name = ""
+    permissions = [Object]
+    ObjectGUID = ""
+}
 
 #Fonction privé du module AD_TO_PSQL
 #___________________________________________________________________________________________________________________________`
@@ -52,130 +77,111 @@ $REGEX_DELETE = 'Modify|DeleteSubdirectoriesAndFiles|Delete'
 de pas perdre de temps et rendre le code plus lisible. Si le vrai ou faux n'est pas définis ils sont True ou False par défaut #>
 function iif {
     param (
-        [bool] $IfCondition,
-        $IfTrue,
-        $IfFalse 
+        [bool]$IfCondition,
+        $IfTrue,#optionnel
+        $IfFalse #optionnel
     )
     try {
-            If ($IfCondition) {
-                return $IfTrue}
-            Else {
-                return  $IfFalse
-            }  
+        if ($null -eq $IfTrue){
+            $IfTrue = $true
+        }
+        if ($null -eq $IfFalse){
+            $IfFalse = $false
+        }
+        If ($IfCondition) {
+            return $IfTrue}
+        else {
+            return  $IfFalse
+        }  
     }
     catch {
-        show_error $_
+        showError $_
         return  $null
     }
 }
 
 
-# Enregistre les mdp et user pour pouvoir se connecter à postgre comme administrateur du serveur de données postgre. Je n'ai pas codé le changement de mot de passe pour des raisons de temps , mais serait à considérer
-function save_windows_credentials ([string] $credential_name) {
+#Pour enregistrer les erreurs sans avoir directement des interactions avec l'utilisateur
+function logError([string] $error_message){
+    Add-Content -Path $LOG_FILE_PATH -Value $error_message`n
+}
+
+<# Fonction surchargé, on peut passer une base de donnée au besoin, on peut passer un utilisateur et sont mots de passe pour faire des
+tests avec un utilisateur en particulier. Si on ne fournit pas ces paramètre on prend le user postgre détenue dans les windows credentials.
+#>
+function psqlCommand ([string] $query,[string] $database =$PGDATABASE, [string] $username =$PGUSER, [securestring] $password  ) {
     try {
+        <# Si le mot passe de est donnée c'est pour exécuter la commande en tant qu'une user particulier sinon c'est pour prendre 
+        le user postgre par défaut , mais il faut être admin de la machine pour y accéder par défaut#>
+        if ($null -eq $password) {
+            <#Obtenir toutes les credentials #>
+            $pg_credential = Get-StoredCredential -Target $PG_WINDOWS_CRED_USER           
+            $username = $pg_credential.UserName
+            $password = $pg_credential.Password      
+        } 
 
-        # Vérifier si la cible existe déjà dans le gestionnaire de Windows Credentials
-        #$existingCredential = Get-StoredCredential -Target $credential_name 
-        $credential = cmdkey /list | Select-String -Pattern $credential_name
+        #Fait une connexion postgre pour executer la commande sql
+        $connection_param = "Host=$PG_HOST;Database=$PGDATABASE;Username=$username;Password="+(ConvertFrom-SecureStringToString -SecureString $password)+";"
+        $connection = New-Object Npgsql.NpgsqlConnection($connection_param)
 
-        if ($credential){}else{
+        #Vérifier si une connexion ou un cursor n'est pas gardé en mémoire lors d'un échec
+        $connection.Open()
+        $create_query = New-Object Npgsql.NpgsqlCommand($query, $connection)
+        #ExecuteReader retourne la valeur 
+        $reader =$create_query.ExecuteReader()
 
-            # Demander le mot de passe de manière sécurisée
-            #Secure string empêche d'accéder directement au credential pour https://learn.microsoft.com/en-us/dotnet/api/system.security.securestring?view=net-8.0           
-            $user = verify_input "Entrez le nom de cette utilisateur postgre administrateur sur le serveur de la machine" "SVP entrez au minimun un caractère" "^.+$" "" 3  $False             
-            $password = ConvertTo-SecureString (verify_input "Entrez le mot de passe de cette utilisateur $user" "SVP entrez au minimun un caractère" "^.+$" "" 3  $False ) -AsPlainText -Force
+        $results = @()
+        <#le resultat sort en un objet et il faut faire une curseur pour trouver la valeur sous forme lisible 
+        en on le map dans un hash pour avoir ainsi des objets
+        La fonction read li un lot de données soit 1 hash a la fois. Les hash sont fait par la fonction read 
+        Je ne peux pas dire pourquoi c'est déja un hash probablement que le format de la librairie npgsql retourne un 
+        format hashable. J'ai prix des exemple et fait des test a partir de code sur ce site  
 
-            # Enregistrer les credentials dans le gestionnaire Windows Credentials
-            #Secure string conversion pour utilisation https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/convertfrom-securestring?view=powershell-7.4
-            
-            #New-StoredCredential -Target $credential_name -UserName $user -Password (ConvertTo-SecureString $password -AsPlainText -Force) -Persist LocalMachine
-
-            cmdkey /add:$credential_name /user:$user /pass:$password
-    
-            Write-Output "Les informations d'identification ont été enregistrées dans le gestionnaire Windows Credentials pour la cible : $credential_name."
-        }
+        https://www.npgsql.org/doc/basic-usage.html
+        https://www.npgsql.org/doc/api/Npgsql.NpgsqlCommand.html
+        Ceci est un example de execute scalar , mais pour miscrosoft en c#
+        https://learn.microsoft.com/en-us/dotnet/api/microsoft.data.sqlclient.sqlcommand.executescalar?view=sqlclient-dotnet-standard-5.2
+        
+        #>
+        if ($reader.HasRows) {
+            while ($reader.Read()) {
+                # Initialize a hash table to store the values of each row dynamically
+                $row = @{}
+        
+                # Loop through all columns in the current row
+                for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+                    # Get the column name and value, add to the row hash table
+                    $colum_name = $reader.GetName($i)
+                    $column_value = $reader.GetValue($i)        
+                    # Store the column name and value in the row hash table
+                    $row[$colum_name] = $column_value
+                }
+        
+                # Add the current row (hash table) to the results array
+                $results += $row
+            }
+        }     
+        #Ferme la connexion
+        $reader.Close()
+        $connection.Close()
+        return $results
     }
     catch {
-        show_error $_
-    }            
-}
-
-function PsqlCommand ([string] $query,[string] $database =$PGDATABASE, [string] $username =$PGUSER, [securestring] $password  ) {
-
-    <# Si le mot passe de est donnée c'est pour exécuter la commande en tant qu'une user particulier sinon c'est pour prendre 
-    le user postgre par défaut , mais il faut être admin de la machine pour y accéder par défaut#>
-    if ($null -eq $password) {
-        <#Prend le mot de passe pour le user postgre de la base de données par défaut. 
-        S'il ne fait pas parti des windows credential il faut le donner pour l'enregistrer #>
-        save_windows_credentials $PG_WINDOWS_CRED_USER
-        $pgCredential = Get-StoredCredential -Target $PG_WINDOWS_CRED_USER
-        
-        #$username = $pgCredential.UserName
-        #$password =  ConvertTo-SecureString($pgCredential.GetNetworkCredential().Password)
-
-        $password = ConvertTo-SecureString ("#Dcvand007") -AsPlainText -Force
-        $username = "postgres"
-        
-        $plain_password = ConvertFrom-SecureStringToString -SecureString $password
-
-        
-    } 
-
-    #Fait une connexion postgre pour executer la commande sql
-    $connection_param = "Host=$PG_HOST;Database=$PGDATABASE;Username=$username;Password=$plain_password;"
-    $connection = New-Object Npgsql.NpgsqlConnection($connection_param)
-    $connection.Open()
-    $createGroupCommand = New-Object Npgsql.NpgsqlCommand($query, $connection)
-    #ExecuteReader retourne la valeur 
-    $reader =$createGroupCommand.ExecuteReader()
-    
-
-    $results = @()
-
-    <#le resultat sort en un objet et il faut faire une curseur pour trouver la valeur sous forme lisible 
-    en on le map dans un hash pour avoir ainsi des objets
-
-    La fonction read li un lot de données soit 1 hash a la fois. Les hash sont fait par la fonction read 
-
-    https://www.npgsql.org/doc/basic-usage.html
-    #>
-    while ($reader.Read()) {
-        # Create a hashtable for each record
-        $record = @{}
-        for ($i = 0; $i -lt $reader.FieldCount; $i++) {
-            $record[$reader.GetName($i)] = $reader.GetValue($i)
-        }
-
-        $results += $record
+        #Essai de fermer la connexion si jamais c'est encore ouvert pour éviter les erreurs
+        try {$reader.Close()}catch{}
+        try {$connection.Close()}catch{}        
+        showError $_
     }
-
-    $connection.Close()
-
-    # Close the reader
-    $reader.Close()
-
-    return $results 
-
-    # Exécute la commande demandé avec le user obtenue admin ou simple utilisateur
-    #$psqlCommand = "psql -h $PG_HOST -U $username -d $database -c `"$permission_query`" --password=$plain_password"
-
-    # Execute the command
-    #return Invoke-Expression $psqlCommand
 }
 
-
-<# Imprimer à l'utilisateur l'ensemble des erreurs#>
-
-function show_error($exception){
+function showError($exception){
         $error_message = $exception.Exception.Message
         $error_type = $exception.Exception.GetType().FullName
         $error_stack_trace = $exception.ScriptStackTrace
-        Write-Output "Erreur: $error_message"
-        Write-Output "Type erreur: $error_type"
-        Write-Output "Étape (Stack Trace): $error_stack_trace"
+        logError "Erreur: $error_message"
+        logError "Type erreur: $error_type"
+        logError "Étape (Stack Trace): $error_stack_trace"
 }
-
-
 
 <#
 Fonction données par chatgpt pour récupérer les secures string. il utilise des objets .net pour convertir dans la mémoire temporaire.
@@ -196,33 +202,31 @@ function ConvertFrom-SecureStringToString {
 
 #Function récursive pour vérifier si les conditions sont respectées. Pour les conditions vrai ou faux il faut taper la condition vrai ou sinon ça retourne faux sans faire plusieurs essait.
 function verify_input (
-[string] $user_input_message = "",
+[string] $user_input = "",
 [string] $error_message = "Invalid input.",
-[string] $trueCondition = "",
-[string] $falseCondition = "",
+[string] $true_condition = "",
+[string] $false_condition = "",
 [int] $number_trial = 0,
 [bool] $returnTrueOrFalse = $False
 ){
     # Si échoue on garde la valeur récursive
-    $false_condition_fail = $falseCondition
-    $true_conditio_fail = $trueCondition
+    $false_condition_fail = $false_condition
+    $true_conditio_fail = $true_condition
     #Validation des conditions parce que je fais la function surchargé afin de la réutiliser pour la validation booléen ou la récupération de valeur 
-    $error_message = iif ($user_input_message -eq "") "Invalid input." $error_message
-    $trueCondition = iif ($trueCondition -eq "") $True $trueCondition
-    $falseCondition = iif ($falseCondition -eq "") $False $falseCondition
-    
-    $user_input = Read-Host $user_input_message
+    $error_message = iif ($user_input -eq "") "Invalid input." $error_message
+    $true_condition = iif ($true_condition -eq "") $True $true_condition
+    $false_condition = iif ($false_condition -eq "") $False $false_condition
 
     # Valide l'entrée utilisateur
     if ($user_input -ne ""){
-        if ($user_input -match $trueCondition) {    
+        if ($user_input -match $true_condition) {    
             if ($returnTrueOrFalse -eq $True) { 
                 return $True     
             } else {
                 return $user_input   
             }
         } else {
-            if ($user_input -match $falseCondition) {  
+            if ($user_input -match $false_condition) {  
                 if ($returnTrueOrFalse -eq $True) { 
                     return $False                 
                 }
@@ -233,197 +237,378 @@ function verify_input (
     $number_trial -= 1
     # Vérifie si le nombre maximum d'essais a été dépassé
     if ($number_trial -le 0) {
-            Write-Host $error_message
+            logError $error_message
         throw "Trop d'erreur dans la lecture de l'entrée"
     }
     # Appel récursif pour permettre à l'utilisateur de réessayer
-    Write-Host "$error_message, il vous reste $number_trial essait"             
-    return verify_input $user_input_message  $error_message $true_conditio_fail $false_condition_fail $number_trial $returnTrueOrFalse          
+    logError "$error_message, il vous reste $number_trial essait"             
+    return verify_input $user_input  $error_message $true_conditio_fail $false_condition_fail $number_trial $returnTrueOrFalse          
 }
-#Liste de controle
-#https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemrights?view=net-8.0
-        
-function PermissionADtoPSQL {
+
+function GetPsqlUser{
+    $select_query =
+        "SELECT
+            grantee as `"NomGroupe`",
+            privilege_type
+        FROM
+            information_schema.role_table_grants
+        WHERE
+            grantee = '$group_name'
+        GROUP BY grantee,privilege_type
+        union
+        SELECT
+            rolname AS `"NomGroupe`",
+            CASE 
+                WHEN rolsuper = true THEN 'SUPER_USER'
+                ELSE 'REGULAR_USER'
+            END AS privilege_type
+        FROM
+            pg_roles
+        WHERE
+            rolname = '$group_name';"
+}
+
+#Liste de controle de permission permettant de faires la lecture des permissions  
+#https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemrights?view=net-8.0      
+function GetPermissionAD {
 
     # Initialisation d'un tableau pour stocker les permissions des groupes
     $group_permissions = @()
 
     # Récupération de tous les groupes qui font parti de l'arbre Domain Controllers
-    $groups = Get-ADGroup -Filter * | Where-Object { $_.DistinguishedName -like "*OU=Domain Controllers,*" }|Select-Object Name
+    $groups = Get-ADGroup -Filter * | Where-Object { ($_.DistinguishedName -like "*OU=Domain Controllers,*" )}|Select-Object Name, ObjectGUID
     $acl = Get-Acl -Path "C:\"
     foreach ($group in $groups) {
+
+        #Copie l'objet pour avoir une réplication travaillable de l'objet AD
+        $retrieive_group = $GroupPermissions.PSObject.Copy()
+
         <#Obtenir le descriptif de sécurité donc les composantes de sécurité de 
         la composant dans le cas présent le C:\#>
-        $group_name = $group.name        
+        $group_name = $group.name 
+        $retrieive_group.name = $group_name  
+        $retrieive_group.ObjectGUID = $group.ObjectGUID     
         $group_access =  $acl.Access | Where-Object { $_.IdentityReference -like "*$group_name" }
         $group_permission = $group_access.FileSystemRights
         #Transforme object groupe de permission en string pour passer d'un objet à un string avec le join a une liste avec split
         $split_permission = ($group_permission -join ',') -split ","
-        $translatePermission = @($false,$false,$false,$false,$false)
+        $translatePermission = $PermissionMatrix.PSObject.Copy()
         foreach ($permission in $split_permission ){
-            <# Permission mise dans un array 
-            array (select, create, update,delete,super_user)
-            array (0,0,0,0,0)
+            <# Permission mise dans l'objet PermissionMatrix
+            (select, create, update,delete,super_user)
             #>
             if ($permission -match 'FullControl|ChangePermissions|TakeOwnership'){
-                $translatePermission = @($true,$true,$true,$true,$true)
+                $translatePermission.select = $true
+                $translatePermission.create = $true
+                $translatePermission.update = $true
+                $translatePermission.delete = $true
+                $translatePermission.super_user = $true                                
             }else{
                 switch -Regex ($permission) {
                     $REGEX_SELECT {
-                        #Select  permission 
-                        $translatePermission[0] = $true
+                        $translatePermission.select = $true
                     }
                     $REGEX_COMMUN_C_U{
-                        #create permission
-                        $translatePermission[1] = $true
-                        #update  permission
-                        $translatePermission[2] = $true
+                        $translatePermission.create = $true
+                        $translatePermission.update = $true
                     }
                     $REGEX_CREATE {
-                        #create permission 
-                        $translatePermission[1] = $true
+                        $translatePermission.create = $true
                     }
                     $REGEX_UPDATE {
-                        #Permission modifie est inclus le write                          
-                        #create permission
-                        $translatePermission[1] = $true
-                        #update  permission
-                        $translatePermission[2] = $true
+                        $translatePermission.create = $true
+                        $translatePermission.update = $true
                     }
                     $REGEX_DELETE {
                         #update  permission 
-                        $translatePermission[3] = $true
+                        $translatePermission.delete = $true
                     }
                 }
             }
             #Création d'un objet pour les permissions traduites du C: vers Postgres
         }
-        $group_permissions += [PSCustomObject]@{
-            name = $group_name
-            permissions =$translatePermission
-        }
+        $retrieive_group.permissions = $translatePermission
+
+        $group_permissions += $retrieive_group
     }
     # Retourner le tableau des permissions par groupe 
     return $group_permissions
 }
 
-
-
-
 #___________________________________________________________________________________________________________________________`
 #Commande du module AD_TO_PSQL
-function Update-GroupPsqlDb{
+function Update-GroupPsql{
     #Paramètre d'entré de la fonction
     try {        
         # Récupère les permissions mises sur le disque C: pour chaque groupe faisant parti des administrateur domaine AD 
-        $list_domain_groups = PermissionADtoPSQL
+        $list_domain_groups = GetPermissionAD
 
         foreach ($group in $list_domain_groups ){
-            $select_permission_db = $group.permissions[0]       
-            #Droit de écriture de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
-            $write_permission_db =$group.permissions[1]  
-            #Droit de modification de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
-            $update_permission_db = $group.permissions[2]         
-            #Droit de supprimer de la base de donnée et les tables de donnée. Ces permissions sont copiés au répertoire C:
-            $delete_permission_db = $group.permissions[3]  
-            #Droit de Super user  de la base de donnée et Full control sur le C
-            $super_user = $group.permissions[4]      
+            #Droit de du groupe de la base de donnée 
+            $select_permission_db = $group.permissions.select       
+            $create_permission_db =$group.permissions.create   
+            $update_permission_db = $group.permissions.update          
+            $delete_permission_db = $group.permissions.delete  
+            $super_user = $group.permissions.super_user
+
             #Variable pour savoir si les permissions sont déjà attribués
             $function_procedure_permission = $false
-    
-            $groupName = $group.name
-            # permission table et de la base de données
+            #Les roles sont enregistrés en minuscule peut importe le input dans PG
+            $groupName = ($group.name).ToLower()
+            # permission table et de la base de données. 
             $group_exist_query = "SELECT 1 FROM pg_roles WHERE rolname = '$groupName';"
 
-
-            $group_exist_query = 'SELECT * FROM public.authors;'
-            $exist =  PsqlCommand($group_exist_query)
-
-            if ($exists -ne "") {
-                # Group does not exist, create it
-                $createGroupQuery = "CREATE ROLE $groupName;"
-                PsqlCommand($createGroupQuery, $connection)
+            $table =  psqlCommand($group_exist_query)
+            $createGroupQuery =''
+            if ($null -eq $table) {
+                $createGroupQuery = "CREATE ROLE $groupName;"                
+            }else{
+                #Pour Faire un ménage des permissions sans trop de difficulté en enelvant tout les permission puisque ce n'est pas nécessaire
+                $createGroupQuery += "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM $groupName;`n"
+                $createGroupQuery += "ALTER ROLE $groupName WITH NOSUPERUSER;`n"
             }
+            psqlCommand($createGroupQuery)
             
             $permission_query = ""
             if ($super_user) {
                 $permission_query += "ALTER ROLE $groupName WITH SUPERUSER;"
-            } else {
-                if ($select_permission_db) { 
-                    $permission_query += "GRANT CONNECT ON SERVER TO $groupName;`n" 
-                    $permission_query += "GRANT USAGE ON SCHEMA public TO $groupName;`n"
-                    $permission_query += "GRANT SELECT ON ALL TABLES IN SCHEMA public TO $groupName;`n"
-                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $groupName;`n"
-                }
-                if ($write_permission_db) { 
-                    $permission_query += "GRANT CREATE ON SCHEMA public TO $groupName;`n"
-                    $permission_query += "GRANT INSERT ON ALL TABLES IN SCHEMA public TO $groupName;`n"
-                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT INSERT ON TABLES TO $groupName;`n"
-                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"  
-                }
-                if ($update_permission_db) {
-                    $permission_query += "GRANT UPDATE ON ALL TABLES IN SCHEMA public TO $groupName;`n"
-                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT UPDATE ON TABLES TO $groupName;`n"
-                    if (-not $function_procedure_permission) {
-                        $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
-                        $function_procedure_permission = $True
-                    }
-                }
-                if ($delete_permission_db) {
-                    $permission_query += "GRANT DELETE ON ALL TABLES IN SCHEMA public TO $groupName;`n" 
-                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT DELETE ON TABLES TO $groupName;`n"
-                    if (-not $function_procedure_permission) {
-                        $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
-                    }
+                $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
+                $function_procedure_permission = $true
+            }
+            if ($select_permission_db || $super_user) { 
+                $permission_query += "GRANT USAGE ON SCHEMA public TO $groupName;`n"
+                $permission_query += "GRANT SELECT ON ALL TABLES IN SCHEMA public TO $groupName;`n"
+                $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $groupName;`n"
+            }
+            if ($create_permission_db || $super_user) { 
+                $permission_query += "GRANT CREATE ON SCHEMA public TO $groupName;`n"
+                $permission_query += "GRANT INSERT ON ALL TABLES IN SCHEMA public TO $groupName;`n"  
+            }
+            if ($update_permission_db || $super_user) {
+                $permission_query += "GRANT UPDATE ON ALL TABLES IN SCHEMA public TO $groupName;`n"
+                $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT UPDATE ON TABLES TO $groupName;`n"
+                if (-not $function_procedure_permission) {
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
+                    $function_procedure_permission = $True
                 }
             }
-
+            if ($delete_permission_db || $super_user) {
+                $permission_query += "GRANT DELETE ON ALL TABLES IN SCHEMA public TO $groupName;`n" 
+                $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT DELETE ON TABLES TO $groupName;`n"
+                if (-not $function_procedure_permission) {
+                    $permission_query += "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO $groupName;`n"
+                }
+            }            
             #Mettre en application les modification des permissions dans la base de donnée.
-            PsqlCommand($permission_query)
+            psqlCommand($permission_query)
         }
     }
     catch {
         #Voici les erreurs 
-        show_error $_
-        Write-Host "La fonction à échoué après plusieurs erreurs"
+        showError $_
     }
 }
 
+<#objectif de la fonction Get-GroupsPsqlPermissionsReport est de faire un rapport des permissions du serveur PSQL 
+afin de voir des discordances entre active directory et postgre sql
+#>
+function Get-GroupsPsqlPermissionsReport{
+    #https://www.postgresql.org/docs/current/information-schema.html
 
-function Add-User{
-    param(
-        [string]$group_name
-    )
+    $list_domain_groups = GetPermissionAD
+    $report_document_text = "Différence entre la base de donnée et PSQL :`n"
+    #Récupére les permissions de la base de données pour une groupe.
+    foreach ($group in $list_domain_groups ){
+        $group_name = $group.name.ToLower()
+        $select_query =
+        "SELECT
+            grantee as `"NomGroupe`",
+            privilege_type
+        FROM
+            information_schema.role_table_grants
+        WHERE
+            grantee = '$group_name'
+        GROUP BY grantee,privilege_type
+        union
+        SELECT
+            rolname AS `"NomGroupe`",
+            CASE 
+                WHEN rolsuper = true THEN 'SUPER_USER'
+                ELSE 'REGULAR_USER'
+            END AS privilege_type
+        FROM
+            pg_roles
+        WHERE
+            rolname = '$group_name';"
+
+        $psql_list_permissions = psqlCommand($select_query)
+        #Copie l'objet des permissions pour traduire les permissions de la base de données en objet standard $PermissionMatrix
+        $translate_psql_permission = $PermissionMatrix.PSObject.Copy()
+        foreach ($permission in $psql_list_permissions){
+            switch ($permission['privilege_type']) {
+                'SELECT' {
+                    $translate_psql_permission.select = $true
+                }
+                'INSERT' {
+                    $translate_psql_permission.create = $true
+                }
+                'UPDATE' {
+                    $translate_psql_permission.update = $true
+                }
+                'DELETE' {
+                    $translate_psql_permission.delete = $true
+                }
+                'SUPER_USER' {
+                    $translate_psql_permission.super_user = $true
+                }
+            }
+        }
+
+        #Compare les permissions de postgre avec les permissions des groupes sur le domain afin de trouver les différences.
+        foreach ($permission_ad in $group.permissions) {
+            foreach ($key in $PermissionMatrix.PSObject.Properties) {
+                # Compare les permissions par leur clé
+                $ad_permission = $permission_ad.$($key.name) 
+                $psql_permission = $translate_psql_permission.$($key.name) 
+                if ($ad_permission -ne $psql_permission) {
+                    $report_document_text += "$group_name || ("+$key.name+") | PSQL = " + $psql_permission+ " | Active Directory = " + $ad_permission+"`n"
+                }
+            }
+        }      
+    }
+    <#Rapport en Unix pour avoir des non de rapport différent et pouvoir les classer au besoin 
+    https://www.reddit.com/r/PowerShell/comments/a5x0cj/converting_to_and_from_windowsunix_time/?rdt=43579
+    #>
+    $unix_time = (Get-Date(Get-Date).ToUniversalTime() -UFormat "%s")
+    $report_name= "Rapport$unix_time.txt"
+    #Fichier de sortie du rapport vers les documents
+    Set-Content -Path $PATH_FILE_RERPORT+$report_name -Value $report_document_text  -Encoding UTF8  
 }
 
-function Remove-Group{
-    param(
-        [string]$group_name
-    )
+<#L'objectif est de créer un nouvel utilisateur dans l'active directory sous un group faisant parti du domaine
+Le script créé l'utilisteur dans la table utilisateur de la base de donnée 
+Si l'utilisateur est full contrôle sur le C: on lui fait un utilisateur afin qu'il puisse faire les opérations 
+de la base de donnée avec son utilisateur. On n'efface pas les utilisateur, mais on ne recré jamais un utilisateur avec
+le même nom. On donne un mot de passe par défaut s'il n'est pas fourni 
+#>
+function Add-UserAdAndPsql([string] $username,[string] $first_name,[string]$last_name,[string] $group_name,[string] $email,[string] $password = $FIRST_TIME_PASSWORD_PSQL ) {
+    try {
+        $group_name = $group_name.ToLower()
+        $email = $email.ToLower()
+        ## Mise à jour des groupes PSQL pour représenter l'active directory
+        Update-GroupPsql
+
+        #Validation des paramètres entrés par l'utilisateur
+        $invalide_input_format
+
+        $invalide_input_format = verify_input $username "Le nom utilisateur est invalide. Entrez des lettre de a-Z ou des chiffre de 0-9" "^[a-zA-Z0-9_-]+$" "" 0  $true
+        $invalide_input_format = verify_input $email "Le format d'email est invalide" "^[\w-]+@[\w-]+\.[\w-]{2,}$" "" 0  $true
+        $invalide_input_format = verify_input $first_name "Le nom est invalide. Entrez des lettre de a-Z" "^[a-zA-Z-]+$" "" 0  $true
+        $invalide_input_format = verify_input $last_name "Le nom de famille utilisateur est invalide. Entrez des lettre de a-Z " "^[a-zA-Z-]+$" "" 0  $true
+        $invalide_input_format = verify_input $group_name "Le nom groupe est invalide. Entrez des lettre de a-Z ou des chiffre de 0-9" "^[a-zA-Z0-9_-]+$" "" 0  $true
+        $invalide_input_format = verify_input $password "Le mot de passe n'est pas assez complexe" $PASSWORD_COMPLEXITY "" 0  $true        
+
+        $secure_password
+        $pg_postgre_value
+        if ($password -ne ""){ 
+            #Supprimer de la mémoire la variable du mot de passe maintenant qu'elle est dans une securestring   
+            $secure_password = ConvertTo-SecureString ($password) -AsPlainText -Force
+
+            #Si le mot de passe contient un ' on remplace ''. La raison est pour ne pas faire d'erreur dans postgres
+            $pg_postgre_value = ConvertTo-SecureString ( $password -replace "'" , "''") -AsPlainText -Force
+            Remove-Variable -Name "password"
+        }else {
+            #On donne le mot de passe par défaut
+            $secure_password = ConvertTo-SecureString ($FIRST_TIME_PASSWORD_PSQL) -AsPlainText -Force 
+        }
+
+        #On valide si le group active directory existe
+        $list_group = GetPermissionAD
+        # Méthode surchargé en quelque sorte si on ne fournit pas les paramètres True et false la logique retourne un boul                     
+        $ad_validation = $false
+        $ad_validation = iif (($list_group | Where-Object { ($_.name).ToLower() -eq "$group_name" }).Count -gt 0) $true logError "le groupe $group_name n'existe pas dans AD"
+
+        # On vérifie le users de la base de donnée n'existe pas
+        $query = "SELECT * FROM USERS"
+        $database_user_list  = psqlCommand($query)
+        $user_db_validation = $false
+        $user_db_validation = iif (($database_user_list | Where-Object { ($_.email).ToLower() -eq "$email"}).Count -eq 0) $true logError "Le email $email est déjà utilisé dans la table users"
+
+        # On vérifie les users du serveur  n'existe pas        
+        $query = "SELECT * FROM USER"
+        $server_user_list  = psqlCommand($query) 
+        $user_server_validation = $false             
+        $user_server_validation = iif (($server_user_list | Where-Object { ($_.user).ToLower() -eq "$username"}).Count -eq 0)  $true logError "Le $username est déjà utilisé sur le serveur"
+
+        #Valide si l'utilisateur n'est pas déja dans l'AD
+        try{        
+            $user = Get-ADUser -Identity $username -ErrorAction SilentlyContinue
+        }catch{
+            $user = $false
+        }
+        if ($user) {
+            logError "L'utilisateur $username existe déjà dans l'AD"
+        }else {           
+            if($ad_validation -and $user_server_validation -and $user_db_validation){
+                $ad_object_guid = ($list_group | Where-Object { ($_.name).ToLower() -eq "$group_name" }).ObjectGUID
+            
+                #Information de domain actuel
+                $forest = Get-ADForest
+                #Ajouter le groupe au active directory
+                New-ADUser `
+                -SamAccountName $username `
+                -UserPrincipalName "$username@$($forest.name)" `
+                -GivenName $first_name `
+                -Surname $last_name `
+                -Name "$first_name $last_name" `
+                -DisplayName "$first_name $last_name" `
+                -EmailAddress $email `
+                -AccountPassword $secure_password `
+                -Enabled $true `
+                -PassThru   
+
+                #Récupère le nom non traduit parce que celui de la liste est changé pour être filtré. Seulement AD ne peut retrouver ce groupe
+                $group = Get-ADObject -Filter "ObjectGUID -eq '$ad_object_guid'" -Properties Name
+                # Add the new user to the specified group
+                Add-ADGroupMember -Identity $group -Members $username 
+                # On ajoute l'utilisateur dans la base de donnée , mais si la transaction échoue on la renverse en sql avec rollback
+                #compris dans le commit si quelques chose échoue
+                try{     
+                    $query_user += "BEGIN;`n"               
+                    if ($group_name = 'administrateur'){
+                        #Créer le user 
+                        $query_user += "CREATE USER $username WITH PASSWORD '"+(ConvertFrom-SecureStringToString $pg_postgre_value)+"';`n"
+                        $query_user += "GRANT $group_name TO $username;`n"
+                    }
+                    $query_user += "INSERT INTO public.users(username, first_name, last_name, group_name, email, password)VALUES ('$username','$first_name','$last_name','$group_name','$email','"+(ConvertFrom-SecureStringToString $pg_postgre_value)+"' );`n"
+                    $query_user += "COMMIT;`n" 
+                    if ($null -ne (psqlCommand $query_user | Where-Object { $_ -match "error" }) ){
+                        #Lance l'erreur pour effacer dans active directory
+                        throw
+                    } 
+                }catch{
+                    Remove-ADUser -Identity $username -Confirm:$false
+                    logError "Les opérations on étés annulés à cause d'une erreur dans la base de données "
+                }
+
+            }else{                
+                showError $_ 
+            }
+        }
+    }
+    catch {
+        showError $_
+    }
 }
-
-function Remove-user{
-    param(
-        [string]$username
-    )
-}
-
-function Edit-User{
-    param(
-        [string]$username
-    )
-} 
-
-function Edit-group{
-    param(
-        [string]$group_name
-    )
-}
-
+ #>
 
 #Uniquement les fonction exporté pour le module afin de garder les fonctions privé non utilisable par l'utilisateur
-#Export-ModuleMember -Function  Add-Group, Add-User, Remove-Group, Remove-user, Edit-User, Edit-group
+#Export-ModuleMember -Function  Add-UserAdAndPsql, Get-GroupsPsqlPermissionsReport, Update-GroupPsql
 
-Update-GroupPsqlDb
+#Add-UserAdAndPsql  "jonny_doe" "Jonny" "Doe" "Administrateur" "jonny_doe@example.com" "password123fk3209*840((48_))"
 
-#PsqlCommand "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false;"
+
+Add-UserAdAndPsql  "jonny_doe" "Jonny" "Doe" "Administrateur" "jonny_doe@example.com" "weak_pass!"
+#Add-UserAdAndPsql  "phillip_v" "Phillip" "Veilleux" "Administrateur" "ph_v@Cr431.com" "password123fk3209*840((48_))"
+#Get-GroupsPsqlPermissionsReport
+#Update-GroupPsql
