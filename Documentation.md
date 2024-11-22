@@ -7,6 +7,43 @@ Liste des modules utilisés dans ce projet.
 
 - **AD-TO-PSQL** : L'objectif du module AD-TO-PSQL est de faciliter la maintenance des permissions d'une base de données en copiant les groupes de l'active directory dans la base de données. Cette fonction est fait pour gérer les permissions de lecture, écriture, création et suppression pour les utilisateur du logiciel. Parfois les applications peuvent utiliser les permissions de l'active directory , mais cette librairie est faites pour donner les permissions mêmes la base de donnée pour éviter les oublies dans le logiciel. 
 
+install .net 
+
+Installer le developper package 
+https://dotnet.microsoft.com/en-us/download/dotnet-framework/net481
+
+
+
+
+Invoke-WebRequest -Uri https://dot.net/v1/dotnet-install.ps1 -OutFile dotnet-install.ps1
+powershell -ExecutionPolicy Bypass -File ./dotnet-install.ps1 -Channel 8.0
+
+mettre environnement variable
+C:\Users\Administrator\AppData\Local\Microsoft\dotnet
+
+mkdir "C:\Program Files\npgsql"
+
+dotnet new console -n MyNpgsqlProject
+
+cd "C:\Program Files\npgsql\MyNpgsqlProject"
+
+dotnet add package Npgsql
+
+dotnet build
+
+
+
+
+
+
+%UserProfile%\.nuget\packages\npgsql\8.0.5\lib\net8.0
+
+
+il faut avoir abstraction pour que ca roule
+
+C:\Users\Administrator\.nuget\packages\microsoft.extensions.logging.abstractions\8.0.0\microsoft.extensions.logging.abstractions.8.0.0\lib\net8.0
+
+
 ## Commandes de création
 
 ### Hyper-v
@@ -22,9 +59,31 @@ Tapez "Y" dans le terminal pour redémarrer la votre machine
 
 ## Installation
 
+# Set TLS 1.2 to ensure secure connections
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Register the PSGallery repository if it's not already registered
+Register-PSRepository -Default
+
+# Install the CredentialManager module
+Install-Module -Name CredentialManager -Scope CurrentUser -Force
+
+Get-WindowsCapability -Name RSAT.ActiveDirectory* -Online | Add-WindowsCapability -Online
+
+Get-Module -ListAvailable -Name ActiveDirectory
+
+
+ Install-Module -Name CredentialManager -Scope CurrentUser
+
+
+Register-PSRepository -Default
+
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-Install-Package -Name Npgsql -Source https://www.nuget.org/api/v2
+ a voir : Install-Package -Name Npgsql -Source https://www.nuget.org/api/v2
+
+Install-Module -Name CredentialManager -Scope CurrentUser  choisir A(all)
+
 
 
 ## Commandes
@@ -33,9 +92,22 @@ Les commandes PowerShell suivantes sont utilisées dans le script :
 ```powershell
 # Commande pour lister les fichiers dans un répertoire
 
+Get-Module -ListAvailable
+
 ```
-Install Putty
+Install-Package Npgsql
+Type Y
 ```
+Tapez A pour tout installer
+
+
+installer nuget 
+
+https://www.nuget.org/downloads
+```
+https://www.postgresql.org/
+```
+
 Invoke-WebRequest -Uri "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi" -OutFile "$env:TEMP\putty-installer.msi"
 ```
 ```
